@@ -1,0 +1,8 @@
+/* Minimal base styles. The component injects its own detailed styles + reset. */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #000;
+}
