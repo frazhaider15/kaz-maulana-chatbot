@@ -9,7 +9,7 @@
 // The key never reaches the browser.
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-opus-4-8";
+const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
 
 export default async function handler(req, res) {
