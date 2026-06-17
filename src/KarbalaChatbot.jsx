@@ -24,6 +24,50 @@ const QUICK_QS = [
 // Audio visualizer bars count
 const BAR_COUNT = 32;
 
+// Known male voices across platforms, in preference order (macOS, Windows, Chrome).
+const MALE_VOICE_PREFERENCES = [
+  "Daniel",                  // macOS en-GB male
+  "Google UK English Male",  // Chrome
+  "Microsoft George",        // Windows en-GB male
+  "Microsoft Ryan",          // Windows en-GB male
+  "Microsoft David",         // Windows en-US male
+  "Microsoft Mark",          // Windows en-US male
+  "Alex",                    // macOS en-US male
+  "Arthur",                  // macOS en-GB male
+  "Rishi",                   // macOS en-IN male
+  "Microsoft Ravi",          // Windows en-IN male
+  "Fred",                    // macOS en-US male
+];
+
+// Substrings that indicate a female voice — used to avoid picking one as a fallback.
+// "google us english" is Chrome's lone US voice and reads female (no male US Google voice exists).
+const FEMALE_VOICE_HINTS = [
+  "female", "zira", "hazel", "susan", "samantha", "victoria", "karen",
+  "moira", "tessa", "fiona", "veena", "catherine", "linda", "heera",
+  "google us english",
+];
+
+// Pick the best available male English voice, or null to fall back to the browser default.
+function pickMaleVoice(voices) {
+  if (!voices || !voices.length) return null;
+  const isEnglish = v => v.lang && v.lang.toLowerCase().startsWith("en");
+  const isFemale = v => FEMALE_VOICE_HINTS.some(h => v.name.toLowerCase().includes(h));
+
+  // 1. Highest priority: a known male voice, in declared order.
+  for (const pref of MALE_VOICE_PREFERENCES) {
+    const hit = voices.find(v => v.name.includes(pref));
+    if (hit) return hit;
+  }
+  // 2. Any voice explicitly labelled "male" (the !isFemale guard rejects "...Female").
+  const labelledMale = voices.find(v => /male/i.test(v.name) && !isFemale(v));
+  if (labelledMale) return labelledMale;
+  // 3. Any English voice that isn't a known female voice.
+  const englishNonFemale = voices.find(v => isEnglish(v) && !isFemale(v));
+  if (englishNonFemale) return englishNonFemale;
+  // 4. Give up gracefully — browser default applies.
+  return null;
+}
+
 export default function SoulMachinesKarbala() {
   const [phase, setPhase] = useState("idle"); // idle | listening | thinking | speaking
   const [transcript, setTranscript] = useState("");
@@ -36,6 +80,7 @@ export default function SoulMachinesKarbala() {
 
   const recRef = useRef(null);
   const synthRef = useRef(window.speechSynthesis);
+  const voicesRef = useRef([]);
   const animFrameRef = useRef(null);
   const breathRef = useRef(null);
 
@@ -92,12 +137,23 @@ export default function SoulMachinesKarbala() {
     recRef.current = rec;
   }, []);
 
+  // Voices load asynchronously — getVoices() is often empty on first call, so
+  // cache them now and refresh when the browser fires `voiceschanged`.
+  useEffect(() => {
+    const synth = synthRef.current;
+    const loadVoices = () => { voicesRef.current = synth.getVoices(); };
+    loadVoices();
+    synth.addEventListener("voiceschanged", loadVoices);
+    return () => synth.removeEventListener("voiceschanged", loadVoices);
+  }, []);
+
   const speak = useCallback((text) => {
     synthRef.current.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.rate = 0.85; utter.pitch = 0.9; utter.volume = 1;
-    const voices = synthRef.current.getVoices();
-    const v = voices.find(v => v.name.includes("Daniel") || v.name.includes("Google UK") || v.lang === "en-GB" || v.name.includes("Male"));
+    // Use the cached list, falling back to a fresh read in case the event hasn't fired yet.
+    const voices = voicesRef.current.length ? voicesRef.current : synthRef.current.getVoices();
+    const v = pickMaleVoice(voices);
     if (v) utter.voice = v;
     utter.onstart = () => setPhase("speaking");
     utter.onend = () => { setPhase("idle"); setTranscript(""); };
