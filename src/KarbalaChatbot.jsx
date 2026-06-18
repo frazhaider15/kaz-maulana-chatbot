@@ -8,7 +8,8 @@ const systemPrompt = `You are "Ustadh Noor" — a warm, gentle, and knowledgeabl
 - Only answer about: Muharram, Karbala, Imam Hussain (AS), Azadari, companions, Ashura, Islamic history
 - If off-topic kindly redirect: "That is a great question! I am here especially to help you learn about Karbala and Imam Hussain. What would you like to know?"
 - Keep answers concise — they will be spoken aloud
-- Speak warmly as if talking directly to a child in a classroom`;
+- Speak warmly as if talking directly to a child in a classroom
+- IMPORTANT: Your reply is read aloud by a voice. Write plain spoken sentences only. Do NOT use emojis, asterisks, markdown, bullet points, headings, or any special symbols.`;
 
 const QUICK_QS = [
   "Who was Imam Hussain?",
@@ -24,48 +25,80 @@ const QUICK_QS = [
 // Audio visualizer bars count
 const BAR_COUNT = 32;
 
-// Known male voices across platforms, in preference order (macOS, Windows, Chrome).
+// Known male voices across platforms, in preference order.
+// Reliable LOCAL voices first (they always play offline). Edge's "Online (Natural)"
+// male voices are listed last: higher quality, but cloud-backed and known to silently
+// fail in Edge's Web Speech API and fall back to the default (often female) voice.
 const MALE_VOICE_PREFERENCES = [
-  "Daniel",                  // macOS en-GB male
-  "Google UK English Male",  // Chrome
-  "Microsoft George",        // Windows en-GB male
-  "Microsoft Ryan",          // Windows en-GB male
-  "Microsoft David",         // Windows en-US male
-  "Microsoft Mark",          // Windows en-US male
-  "Alex",                    // macOS en-US male
-  "Arthur",                  // macOS en-GB male
-  "Rishi",                   // macOS en-IN male
-  "Microsoft Ravi",          // Windows en-IN male
-  "Fred",                    // macOS en-US male
+  // Classic local Windows male (always play offline)
+  "Microsoft David", "Microsoft Mark", "Microsoft George", "Microsoft Ravi",
+  // macOS local male
+  "Daniel", "Alex", "Arthur", "Rishi", "Fred",
+  // Chrome
+  "Google UK English Male",
+  // Edge "Online (Natural)" male voices — last resort (cloud-dependent)
+  "Guy", "Christopher", "Eric", "Roger", "Steffan", "Brian", "Andrew",
+  "Ryan", "Thomas", "Brandon",
 ];
 
 // Substrings that indicate a female voice — used to avoid picking one as a fallback.
 // "google us english" is Chrome's lone US voice and reads female (no male US Google voice exists).
 const FEMALE_VOICE_HINTS = [
-  "female", "zira", "hazel", "susan", "samantha", "victoria", "karen",
+  "female",
+  // Edge natural female names ("microsoft ana" is qualified so it can't match "...(Canada)")
+  "aria", "jenny", "michelle", "microsoft ana", "sonia", "libby", "emma", "nancy", "ava",
+  // Classic Windows / macOS / Chrome female
+  "zira", "hazel", "susan", "samantha", "victoria", "karen",
   "moira", "tessa", "fiona", "veena", "catherine", "linda", "heera",
   "google us english",
 ];
 
 // Pick the best available male English voice, or null to fall back to the browser default.
+// Local voices are strongly preferred: Edge's cloud "Online (Natural)" voices are listed
+// by getVoices() but often don't actually play and fall back to the default female voice.
 function pickMaleVoice(voices) {
   if (!voices || !voices.length) return null;
   const isEnglish = v => v.lang && v.lang.toLowerCase().startsWith("en");
   const isFemale = v => FEMALE_VOICE_HINTS.some(h => v.name.toLowerCase().includes(h));
+  const matchesPref = v => MALE_VOICE_PREFERENCES.some(p => v.name.includes(p));
 
-  // 1. Highest priority: a known male voice, in declared order.
+  // 1. A known male voice that is LOCAL (most reliable — always plays, definitely male).
+  const localKnownMale = voices.find(v => v.localService && isEnglish(v) && matchesPref(v));
+  if (localKnownMale) return localKnownMale;
+  // 2. Any LOCAL English voice that isn't a known female voice.
+  const localEnglishMale = voices.find(v => v.localService && isEnglish(v) && !isFemale(v));
+  if (localEnglishMale) return localEnglishMale;
+  // 3. A known male voice including cloud ones, in declared order (machines with no local male).
   for (const pref of MALE_VOICE_PREFERENCES) {
     const hit = voices.find(v => v.name.includes(pref));
     if (hit) return hit;
   }
-  // 2. Any voice explicitly labelled "male" (the !isFemale guard rejects "...Female").
+  // 4. Any voice explicitly labelled "male" (the !isFemale guard rejects "...Female").
   const labelledMale = voices.find(v => /male/i.test(v.name) && !isFemale(v));
   if (labelledMale) return labelledMale;
-  // 3. Any English voice that isn't a known female voice.
+  // 5. Any English voice that isn't a known female voice.
   const englishNonFemale = voices.find(v => isEnglish(v) && !isFemale(v));
   if (englishNonFemale) return englishNonFemale;
-  // 4. Give up gracefully — browser default applies.
+  // 6. Give up gracefully — browser default applies.
   return null;
+}
+
+// Strip emojis and markdown symbols so the voice doesn't read them aloud
+// (e.g. "**Imam**" being spoken as "asterisk asterisk Imam"). Also used for the
+// on-screen caption so it matches what's spoken.
+function cleanForSpeech(text) {
+  if (!text) return "";
+  return text
+    // Remove emoji / pictographic symbols, plus joiners (U+200D), variation
+    // selectors (U+FE0F) and the combining enclosing keycap (U+20E3).
+    .replace(/[\p{Extended_Pictographic}‍️⃣]/gu, "")
+    // Remove markdown formatting characters: * _ ` ~ # > and leading list dashes.
+    .replace(/[*_`~#>]/g, "")
+    .replace(/^[ \t]*[-•]\s+/gm, "")
+    // Collapse whitespace left behind.
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export default function SoulMachinesKarbala() {
@@ -154,7 +187,10 @@ export default function SoulMachinesKarbala() {
     // Use the cached list, falling back to a fresh read in case the event hasn't fired yet.
     const voices = voicesRef.current.length ? voicesRef.current : synthRef.current.getVoices();
     const v = pickMaleVoice(voices);
-    if (v) utter.voice = v;
+    // TEMP DIAGNOSTIC — remove once the male voice is confirmed working.
+    console.log("[TTS] available voices:", voices.map(x => `${x.name} (${x.lang})`));
+    console.log("[TTS] picked voice:", v ? `${v.name} (${v.lang})` : "NONE — using browser default");
+    if (v) { utter.voice = v; utter.lang = v.lang; }
     utter.onstart = () => setPhase("speaking");
     utter.onend = () => { setPhase("idle"); setTranscript(""); };
     utter.onerror = () => setPhase("idle");
@@ -184,8 +220,9 @@ export default function SoulMachinesKarbala() {
         data.content?.[0]?.text ||
         data.error?.message ||
         "I am sorry, please try again.";
-      setCaption(answer);
-      speak(answer);
+      const spoken = cleanForSpeech(answer);
+      setCaption(spoken);
+      speak(spoken);
     } catch {
       setError("Connection failed. Please try again.");
       setPhase("idle");
