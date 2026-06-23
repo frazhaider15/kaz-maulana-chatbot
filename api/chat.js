@@ -8,6 +8,8 @@
 // Vercel → Project Settings → Environment Variables) and forwards to Anthropic.
 // The key never reaches the browser.
 
+import { Readable } from "node:stream";
+
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
@@ -46,13 +48,26 @@ export default async function handler(req, res) {
         max_tokens: MAX_TOKENS,
         system,
         messages,
+        // Stream tokens so the browser can speak the first sentence while the
+        // rest of the answer is still being generated.
+        stream: true,
       }),
     });
 
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("Content-Type", "application/json");
-    res.send(text);
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text();
+      res.status(upstream.status || 502);
+      res.setHeader("Content-Type", "application/json");
+      res.send(errText || JSON.stringify({ error: { message: "Chat request failed" } }));
+      return;
+    }
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Connection", "keep-alive");
+    // Pipe Anthropic's SSE straight to the client.
+    Readable.fromWeb(upstream.body).pipe(res);
   } catch (err) {
     res.status(500).json({ error: { message: String(err) } });
   }

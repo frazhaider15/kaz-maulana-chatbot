@@ -1,13 +1,16 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { Readable } from "node:stream";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
 
 const ELEVENLABS_DEFAULT_VOICE_ID = "pqHfZKP75CvOlQylNhV4";
-const ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
-const ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128";
+// eleven_flash_v2_5 is ElevenLabs' lowest-latency model; the lighter audio
+// format means a faster first chunk when streaming. Both are env-overridable.
+const ELEVENLABS_MODEL_ID = "eleven_flash_v2_5";
+const ELEVENLABS_OUTPUT_FORMAT = "mp3_22050_32";
 const ELEVENLABS_VOICE_SETTINGS = {
   stability: 0.5,
   similarity_boost: 0.75,
@@ -58,13 +61,25 @@ function anthropicProxy(apiKey) {
           max_tokens: MAX_TOKENS,
           system: body.system,
           messages: body.messages,
+          // Stream tokens so the browser can speak the first sentence while the
+          // rest of the answer is still being generated.
+          stream: true,
         }),
       });
 
-      const text = await upstream.text();
-      res.statusCode = upstream.status;
-      res.setHeader("Content-Type", "application/json");
-      res.end(text);
+      if (!upstream.ok || !upstream.body) {
+        const errText = await upstream.text();
+        res.statusCode = upstream.status || 502;
+        res.setHeader("Content-Type", "application/json");
+        res.end(errText || JSON.stringify({ error: { message: "Chat request failed" } }));
+        return;
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Connection", "keep-alive");
+      Readable.fromWeb(upstream.body).pipe(res);
     } catch (err) {
       res.statusCode = 500;
       res.setHeader("Content-Type", "application/json");
@@ -83,9 +98,10 @@ function anthropicProxy(apiKey) {
   };
 }
 
-function elevenLabsProxy(apiKey, voiceId) {
+function elevenLabsProxy(apiKey, voiceId, modelId, outputFormat) {
   const handle = async (req, res, next) => {
-    if (req.method !== "POST" || !req.url.startsWith("/api/tts")) {
+    const isTts = req.url.startsWith("/api/tts");
+    if (!isTts || (req.method !== "GET" && req.method !== "POST")) {
       return next();
     }
 
@@ -104,10 +120,20 @@ function elevenLabsProxy(apiKey, voiceId) {
     }
 
     try {
-      const body = await readJson(req);
-      const text = (body.text || "").toString();
+      // GET: text in the query string (browser <audio> streams it directly).
+      // POST: text in the JSON body.
+      let text;
+      if (req.method === "GET") {
+        text = (new URL(req.url, "http://localhost").searchParams.get("text") || "").toString();
+      } else {
+        const body = await readJson(req);
+        text = (body.text || "").toString();
+      }
+
+      // /stream returns audio as it's generated; piping it through lets the
+      // browser begin playback on the first chunk instead of the whole file.
       const upstream = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${ELEVENLABS_OUTPUT_FORMAT}`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=${outputFormat}`,
         {
           method: "POST",
           headers: {
@@ -117,25 +143,24 @@ function elevenLabsProxy(apiKey, voiceId) {
           },
           body: JSON.stringify({
             text,
-            model_id: ELEVENLABS_MODEL_ID,
+            model_id: modelId,
             voice_settings: ELEVENLABS_VOICE_SETTINGS,
           }),
         }
       );
 
-      if (!upstream.ok) {
+      if (!upstream.ok || !upstream.body) {
         const errText = await upstream.text();
-        res.statusCode = upstream.status;
+        res.statusCode = upstream.status || 502;
         res.setHeader("Content-Type", "application/json");
         res.end(errText || JSON.stringify({ error: { message: "TTS request failed" } }));
         return;
       }
 
-      const audio = Buffer.from(await upstream.arrayBuffer());
       res.statusCode = 200;
       res.setHeader("Content-Type", "audio/mpeg");
       res.setHeader("Cache-Control", "no-store");
-      res.end(audio);
+      Readable.fromWeb(upstream.body).pipe(res);
     } catch (err) {
       res.statusCode = 500;
       res.setHeader("Content-Type", "application/json");
@@ -175,11 +200,13 @@ export default defineConfig(({ mode }) => {
   // Load all env vars (including non-VITE_ prefixed) so the proxy can read the key.
   const env = loadEnv(mode, process.cwd(), "");
   const voiceId = env.ELEVENLABS_VOICE_ID || ELEVENLABS_DEFAULT_VOICE_ID;
+  const modelId = env.ELEVENLABS_MODEL_ID || ELEVENLABS_MODEL_ID;
+  const outputFormat = env.ELEVENLABS_OUTPUT_FORMAT || ELEVENLABS_OUTPUT_FORMAT;
   return {
     plugins: [
       react(),
       anthropicProxy(env.ANTHROPIC_API_KEY),
-      elevenLabsProxy(env.ELEVENLABS_API_KEY, voiceId),
+      elevenLabsProxy(env.ELEVENLABS_API_KEY, voiceId, modelId, outputFormat),
     ],
   };
 });
