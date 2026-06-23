@@ -25,64 +25,6 @@ const QUICK_QS = [
 // Audio visualizer bars count
 const BAR_COUNT = 32;
 
-// Known male voices across platforms, in preference order.
-// Reliable LOCAL voices first (they always play offline). Edge's "Online (Natural)"
-// male voices are listed last: higher quality, but cloud-backed and known to silently
-// fail in Edge's Web Speech API and fall back to the default (often female) voice.
-const MALE_VOICE_PREFERENCES = [
-  // Classic local Windows male (always play offline)
-  "Microsoft David", "Microsoft Mark", "Microsoft George", "Microsoft Ravi",
-  // macOS local male
-  "Daniel", "Alex", "Arthur", "Rishi", "Fred",
-  // Chrome
-  "Google UK English Male",
-  // Edge "Online (Natural)" male voices — last resort (cloud-dependent)
-  "Guy", "Christopher", "Eric", "Roger", "Steffan", "Brian", "Andrew",
-  "Ryan", "Thomas", "Brandon",
-];
-
-// Substrings that indicate a female voice — used to avoid picking one as a fallback.
-// "google us english" is Chrome's lone US voice and reads female (no male US Google voice exists).
-const FEMALE_VOICE_HINTS = [
-  "female",
-  // Edge natural female names ("microsoft ana" is qualified so it can't match "...(Canada)")
-  "aria", "jenny", "michelle", "microsoft ana", "sonia", "libby", "emma", "nancy", "ava",
-  // Classic Windows / macOS / Chrome female
-  "zira", "hazel", "susan", "samantha", "victoria", "karen",
-  "moira", "tessa", "fiona", "veena", "catherine", "linda", "heera",
-  "google us english",
-];
-
-// Pick the best available male English voice, or null to fall back to the browser default.
-// Local voices are strongly preferred: Edge's cloud "Online (Natural)" voices are listed
-// by getVoices() but often don't actually play and fall back to the default female voice.
-function pickMaleVoice(voices) {
-  if (!voices || !voices.length) return null;
-  const isEnglish = v => v.lang && v.lang.toLowerCase().startsWith("en");
-  const isFemale = v => FEMALE_VOICE_HINTS.some(h => v.name.toLowerCase().includes(h));
-  const matchesPref = v => MALE_VOICE_PREFERENCES.some(p => v.name.includes(p));
-
-  // 1. A known male voice that is LOCAL (most reliable — always plays, definitely male).
-  const localKnownMale = voices.find(v => v.localService && isEnglish(v) && matchesPref(v));
-  if (localKnownMale) return localKnownMale;
-  // 2. Any LOCAL English voice that isn't a known female voice.
-  const localEnglishMale = voices.find(v => v.localService && isEnglish(v) && !isFemale(v));
-  if (localEnglishMale) return localEnglishMale;
-  // 3. A known male voice including cloud ones, in declared order (machines with no local male).
-  for (const pref of MALE_VOICE_PREFERENCES) {
-    const hit = voices.find(v => v.name.includes(pref));
-    if (hit) return hit;
-  }
-  // 4. Any voice explicitly labelled "male" (the !isFemale guard rejects "...Female").
-  const labelledMale = voices.find(v => /male/i.test(v.name) && !isFemale(v));
-  if (labelledMale) return labelledMale;
-  // 5. Any English voice that isn't a known female voice.
-  const englishNonFemale = voices.find(v => isEnglish(v) && !isFemale(v));
-  if (englishNonFemale) return englishNonFemale;
-  // 6. Give up gracefully — browser default applies.
-  return null;
-}
-
 // Strip emojis and markdown symbols so the voice doesn't read them aloud
 // (e.g. "**Imam**" being spoken as "asterisk asterisk Imam"). Also used for the
 // on-screen caption so it matches what's spoken.
@@ -112,8 +54,9 @@ export default function SoulMachinesKarbala() {
   const [breathScale, setBreathScale] = useState(1);
 
   const recRef = useRef(null);
-  const synthRef = useRef(window.speechSynthesis);
-  const voicesRef = useRef([]);
+  const audioRef = useRef(null);
+  const urlRef = useRef(null);
+  const ttsAbortRef = useRef(null);
   const animFrameRef = useRef(null);
   const breathRef = useRef(null);
 
@@ -170,31 +113,80 @@ export default function SoulMachinesKarbala() {
     recRef.current = rec;
   }, []);
 
-  // Voices load asynchronously — getVoices() is often empty on first call, so
-  // cache them now and refresh when the browser fires `voiceschanged`.
+  // Reuse one audio element so each reply can autoplay after the first user
+  // gesture and the blob URL can be revoked safely after playback.
   useEffect(() => {
-    const synth = synthRef.current;
-    const loadVoices = () => { voicesRef.current = synth.getVoices(); };
-    loadVoices();
-    synth.addEventListener("voiceschanged", loadVoices);
-    return () => synth.removeEventListener("voiceschanged", loadVoices);
+    const audio = new Audio();
+    audio.onplay = () => setPhase("speaking");
+    audio.onended = () => { setPhase("idle"); setTranscript(""); revokeUrl(); };
+    audio.onerror = () => setPhase("idle");
+    audioRef.current = audio;
+    return () => {
+      audio.pause();
+      revokeUrl();
+    };
   }, []);
 
-  const speak = useCallback((text) => {
-    synthRef.current.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = 0.85; utter.pitch = 0.9; utter.volume = 1;
-    // Use the cached list, falling back to a fresh read in case the event hasn't fired yet.
-    const voices = voicesRef.current.length ? voicesRef.current : synthRef.current.getVoices();
-    const v = pickMaleVoice(voices);
-    // TEMP DIAGNOSTIC — remove once the male voice is confirmed working.
-    console.log("[TTS] available voices:", voices.map(x => `${x.name} (${x.lang})`));
-    console.log("[TTS] picked voice:", v ? `${v.name} (${v.lang})` : "NONE — using browser default");
-    if (v) { utter.voice = v; utter.lang = v.lang; }
-    utter.onstart = () => setPhase("speaking");
-    utter.onend = () => { setPhase("idle"); setTranscript(""); };
-    utter.onerror = () => setPhase("idle");
-    synthRef.current.speak(utter);
+  function revokeUrl() {
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+  }
+
+  function stopAudio() {
+    ttsAbortRef.current?.abort();
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    revokeUrl();
+    setPhase("idle");
+  }
+
+  const speak = useCallback(async (text) => {
+    const clean = cleanForSpeech(text);
+    if (!clean) return;
+
+    stopAudio();
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: clean }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error?.message || "Voice playback failed. Please try again.");
+        setPhase("idle");
+        return;
+      }
+
+      const buf = await res.arrayBuffer();
+      if (controller.signal.aborted) return;
+
+      revokeUrl();
+      const url = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+      urlRef.current = url;
+
+      const audio = audioRef.current;
+      if (!audio) {
+        setError("Audio playback is unavailable in this browser.");
+        setPhase("idle");
+        return;
+      }
+
+      audio.src = url;
+      await audio.play();
+    } catch {
+      setPhase("idle");
+    }
   }, []);
 
   const sendQuestion = useCallback(async (q) => {
@@ -230,7 +222,7 @@ export default function SoulMachinesKarbala() {
   }, [speak]);
 
   const toggleMic = () => {
-    if (phase === "speaking") { synthRef.current.cancel(); setPhase("idle"); return; }
+    if (phase === "speaking") { stopAudio(); return; }
     if (phase === "listening") { recRef.current?.stop(); setPhase("idle"); return; }
     if (phase === "thinking") return;
     setError(""); setTranscript("");

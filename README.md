@@ -5,12 +5,13 @@ about Karbala, Imam Hussain (AS), Muharram, and Azadari. Built with React + Vite
 KAZ School & Welfare.
 
 The app listens to a spoken question (Web Speech API), sends it to Claude, and
-speaks the answer back with an animated audio visualizer.
+speaks the answer back through ElevenLabs with an animated audio visualizer.
 
 ## Prerequisites
 
 - **Node.js 18+** (this project was set up on Node 22)
 - An **Anthropic API key** — https://console.anthropic.com/settings/keys
+- An **ElevenLabs API key** — https://elevenlabs.io/app/settings/api-keys
 - A **Chromium-based browser** (Chrome or Edge) — voice input uses the Web
   Speech `SpeechRecognition` API, which Firefox/Safari don't fully support.
 
@@ -20,9 +21,9 @@ speaks the answer back with an animated audio visualizer.
 # 1. Install dependencies
 npm install
 
-# 2. Add your API key
+# 2. Add your API keys
 cp .env.example .env       # on Windows PowerShell: copy .env.example .env
-# then edit .env and paste your Anthropic key
+# then edit .env and paste your Anthropic + ElevenLabs keys
 
 # 3. Start the dev server
 npm run dev
