@@ -37,15 +37,23 @@ ask a question, or tap **Questions** for suggested prompts.
 ```
 Browser (React)  ──POST /api/chat──►  Vite dev-server proxy  ──►  Anthropic API
    (no API key)                        (injects ANTHROPIC_API_KEY)
+
+Browser (React)  ──POST /api/tts ──►  Vite dev-server proxy  ──►  ElevenLabs API
+  (no API key)                        (injects ELEVENLABS_API_KEY)
 ```
 
 - `src/KarbalaChatbot.jsx` — the UI component (voice in, Claude, voice out).
 - `vite.config.js` — a small middleware that proxies `/api/chat` to Anthropic so
   the **API key stays on the server** and is never shipped to the browser. It
   also avoids the CORS block that prevents calling Anthropic directly from a page.
+  It also proxies `/api/tts` to ElevenLabs for voice output.
 
-The proxy pins the model to `claude-opus-4-8`. To change it, edit the `MODEL`
+The proxy pins the model to `claude-sonnet-4-6`. To change it, edit the `MODEL`
 constant near the top of `vite.config.js`.
+
+For voice output, the app uses ElevenLabs via `/api/tts`. The default voice is
+the built-in premade voice `pqHfZKP75CvOlQylNhV4` (Bill), and you can override
+it by setting `ELEVENLABS_VOICE_ID` in `.env`.
 
 ## Build for production
 
@@ -61,18 +69,20 @@ npm run preview   # serves dist/ with the same /api/chat proxy
 ## Deploying to Vercel
 
 The local proxy in `vite.config.js` does **not** run on Vercel (Vercel serves the
-static `dist/` build, with no Vite server). Instead, `api/chat.js` is a **Vercel
-serverless function** that does the same job in production — Vercel automatically
-exposes any file in the root `api/` folder, so it becomes `/api/chat`.
+static `dist/` build, with no Vite server). Instead, `api/chat.js` and
+`api/tts.js` are **Vercel serverless functions** that do the same job in
+production — Vercel automatically exposes any file in the root `api/` folder,
+so they become `/api/chat` and `/api/tts`.
 
 Two things are required for it to work:
 
-1. **The `api/chat.js` file must be deployed** (commit/push it, or redeploy).
-2. **Set the API key in Vercel:** Project → Settings → Environment Variables →
-   add `ANTHROPIC_API_KEY` = your key (apply to Production, and Preview if you
-   use it). Then **redeploy** — env-var changes only take effect on a new build.
+1. **The `api/chat.js` and `api/tts.js` files must be deployed** (commit/push them, or redeploy).
+2. **Set the API keys in Vercel:** Project → Settings → Environment Variables →
+  add `ANTHROPIC_API_KEY` and `ELEVENLABS_API_KEY` (plus optional
+  `ELEVENLABS_VOICE_ID`) for Production and Preview if you use it. Then
+  **redeploy** — env-var changes only take effect on a new build.
 
-Until the key is set, the app shows
+Until the keys are set, the app shows
 "ANTHROPIC_API_KEY is not set…" as its on-screen reply.
 
 > Local dev (`vite.config.js` proxy) and production (`api/chat.js` function) share
@@ -82,5 +92,5 @@ Until the key is set, the app shows
 
 - Microphone access requires `localhost` or HTTPS, and you must grant the
   permission prompt.
-- Voice recognition and the chosen speech-synthesis voice depend on the
-  browser/OS; results vary across machines.
+- Voice recognition depends on the browser/OS; results vary across machines.
+- Voice output now depends on ElevenLabs plus the `ELEVENLABS_API_KEY` setting.
